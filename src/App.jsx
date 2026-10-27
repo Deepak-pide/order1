@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowRight,
   HardHat,
@@ -13,13 +13,54 @@ import {
   Truck,
   X,
 } from 'lucide-react'
-import { Link, useLocation } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { AdminApp } from './admin/AdminApp.jsx'
 import { DEFAULT_HERO_SLIDES, fromBranch, fromCategory, fromProduct, fromSettings, formatRupees, sellingPrice } from './lib/storeData.js'
 import { describeSupabaseError, isSupabaseConfigured, supabase } from './lib/supabase.js'
+import { playUiSound } from './lib/uiSounds.js'
 
-function Header({ cartCount, search, setSearch, onCart, settings }) {
+function categoryImage(categoryName) {
+  const name = categoryName.toLowerCase()
+  if (/bar|rod|steel/.test(name)) return '/categories/bars.png'
+  if (/cement/.test(name)) return '/categories/cement.png'
+  if (/paint/.test(name)) return '/categories/paints.png'
+  if (/sheet/.test(name)) return '/categories/sheets.png'
+  return ''
+}
+
+function categorySlug(categoryName) {
+  return categoryName.toLowerCase().trim().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+function SearchBox({ search, onSearch, products, categories, onSelectCategory, onSelectProduct, className = '' }) {
+  const [focused, setFocused] = useState(false)
+  const query = search.trim().toLowerCase()
+  const productSuggestions = query
+    ? products.filter((product) => product.active && `${product.name} ${product.description} ${product.category}`.toLowerCase().includes(query)).slice(0, 6)
+    : []
+  const categorySuggestions = query
+    ? categories.filter((category) => category.name.toLowerCase().includes(query))
+    : []
+
+  return <div className={`relative ${className}`} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) window.setTimeout(() => setFocused(false), 100)
+  }}>
+    <label className="flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 focus-within:border-amber-400">
+      <Search size={16} className="shrink-0 text-slate-400" />
+      <input value={search} onFocus={() => setFocused(true)} onChange={(event) => onSearch(event.target.value)} placeholder="Search products..." aria-label="Search products" aria-expanded={focused && Boolean(query)} className="w-full bg-transparent text-xs outline-none placeholder:text-slate-400" />
+      {search && <button type="button" aria-label="Clear search" onClick={() => { onSearch(''); setFocused(false) }} className="rounded p-1 text-slate-400 hover:bg-slate-100"><X size={14} /></button>}
+    </label>
+    {focused && query && <div role="listbox" aria-label="Search suggestions" className="absolute left-0 right-0 top-full z-50 mt-1 max-h-80 overflow-y-auto rounded-lg border border-slate-200 bg-white py-1 shadow-xl">
+      {categorySuggestions.map((category) => <button key={category.id} type="button" role="option" onClick={() => { onSelectCategory(category.name); setFocused(false) }} className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-amber-50"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-amber-50">{categoryImage(category.name) ? <img src={categoryImage(category.name)} alt="" className="h-8 w-8 object-contain" /> : <Package size={17} className="text-slate-500" />}</span><span className="min-w-0"><span className="block truncate text-xs font-semibold text-slate-800">{category.name}</span><span className="block text-[10px] text-slate-500">Category</span></span><ArrowRight size={14} className="ml-auto shrink-0 text-slate-400" /></button>)}
+      {productSuggestions.map((product) => <button key={product.id} type="button" role="option" onClick={() => { onSelectProduct(product); setFocused(false) }} className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-amber-50"><span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md bg-slate-100">{product.image ? <img src={product.image} alt="" className="h-full w-full object-cover" /> : <Package size={17} className="text-slate-500" />}</span><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-slate-800">{product.name}</span><span className="block truncate text-[10px] text-slate-500">{product.category} · {formatRupees(sellingPrice(product))}</span></span><ArrowRight size={14} className="shrink-0 text-slate-400" /></button>)}
+      {categorySuggestions.length === 0 && productSuggestions.length === 0 && <p className="px-3 py-3 text-xs text-slate-500">No matching products or categories.</p>}
+    </div>}
+  </div>
+}
+
+function Header({ cartCount, search, onSearch, products, categories, onSelectCategory, onSelectProduct, onCart, settings }) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const location = useLocation()
   const nav = [
     ['Home', '#home'],
     ['Shop', '#products'],
@@ -27,6 +68,8 @@ function Header({ cartCount, search, setSearch, onCart, settings }) {
     ['About us', '#about'],
     ['Contact', '#contact'],
   ]
+  const chooseCategory = (category) => { onSelectCategory(category); setMenuOpen(false) }
+  const chooseProduct = (product) => { onSelectProduct(product); setMenuOpen(false) }
 
   return (
     <>
@@ -35,22 +78,19 @@ function Header({ cartCount, search, setSearch, onCart, settings }) {
       </div>
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white">
         <div className="mx-auto flex h-[76px] max-w-7xl items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
-          <a href="#home" className="flex shrink-0 items-center gap-2.5">
+          <Link to="/" className="flex shrink-0 items-center gap-2.5">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500 text-slate-950"><HardHat size={23} strokeWidth={2.5} /></span>
             <span>
               <span className="block text-[17px] font-extrabold leading-5 tracking-tight text-slate-900">{settings.businessName}</span>
               <span className="mt-0.5 block text-[9px] font-semibold tracking-[0.2em] text-slate-500">BUILDING MATERIALS</span>
             </span>
-          </a>
+          </Link>
           <nav className="hidden items-center gap-7 lg:flex">
-            {nav.map(([label, href], index) => <a key={label} href={href} className={`text-[13px] font-semibold transition hover:text-amber-600 ${index === 0 ? 'text-amber-600' : 'text-slate-600'}`}>{label}</a>)}
+            {nav.map(([label, href], index) => <a key={label} href={location.pathname === '/' ? href : `/${href}`} className={`text-[13px] font-semibold transition hover:text-amber-600 ${index === 0 ? 'text-amber-600' : 'text-slate-600'}`}>{label}</a>)}
           </nav>
           <div className="flex items-center gap-2 sm:gap-3">
             <Link to="/admin" className="hidden items-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold text-slate-600 transition hover:bg-amber-50 hover:text-amber-700 sm:inline-flex"><LogIn size={15} /> Business login</Link>
-            <label className="hidden h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 md:flex">
-              <Search size={16} className="text-slate-400" />
-              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search products..." className="w-36 bg-transparent text-xs outline-none placeholder:text-slate-400 lg:w-44" />
-            </label>
+            <SearchBox search={search} onSearch={onSearch} products={products} categories={categories} onSelectCategory={chooseCategory} onSelectProduct={chooseProduct} className="hidden w-44 md:block lg:w-56" />
             <button onClick={onCart} aria-label="Shopping cart" className="relative flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 text-slate-700 transition hover:border-amber-400 hover:text-slate-950">
               <ShoppingCart size={18} />
               <span className="hidden text-xs font-semibold sm:block">Cart</span>
@@ -60,8 +100,8 @@ function Header({ cartCount, search, setSearch, onCart, settings }) {
           </div>
         </div>
         {menuOpen && <nav className="border-t border-slate-100 bg-white px-4 py-3 shadow-lg lg:hidden">
-          <label className="mb-2 flex h-10 items-center gap-2 rounded-lg border border-slate-200 px-3 md:hidden"><Search size={16} className="text-slate-400" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search products..." className="w-full bg-transparent text-sm outline-none" /></label>
-          {nav.map(([label, href]) => <a key={label} href={href} onClick={() => setMenuOpen(false)} className="block rounded-lg px-3 py-3 text-sm font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700">{label}</a>)}
+          <SearchBox search={search} onSearch={onSearch} products={products} categories={categories} onSelectCategory={chooseCategory} onSelectProduct={chooseProduct} className="mb-2 w-full md:hidden" />
+          {nav.map(([label, href]) => <a key={label} href={location.pathname === '/' ? href : `/${href}`} onClick={() => setMenuOpen(false)} className="block rounded-lg px-3 py-3 text-sm font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700">{label}</a>)}
           <Link to="/admin" onClick={() => setMenuOpen(false)} className="mt-1 flex items-center gap-2 rounded-lg px-3 py-3 text-sm font-semibold text-amber-700 hover:bg-amber-50"><LogIn size={16} /> Administrator & branch login</Link>
         </nav>}
       </header>
@@ -120,27 +160,33 @@ function CategorySection({ categories }) {
         <a href="#products" className="hidden items-center gap-1 text-xs font-bold text-slate-700 hover:text-amber-700 sm:flex">All products <ArrowRight size={15} /></a>
       </div>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 lg:gap-4">
-        {categories.map((category) => <a key={category.id} href="#products" className="group flex min-h-[128px] items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 transition hover:-translate-y-0.5 hover:border-amber-300 hover:shadow-md sm:gap-4 sm:p-5">
-          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-700"><Package size={21} strokeWidth={1.8} /></span>
+        {categories.map((category) => <Link key={category.id} to={`/category/${categorySlug(category.name)}`} className="group flex min-h-[128px] items-center gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:-translate-y-0.5 hover:border-amber-300 hover:shadow-md sm:gap-4 sm:p-5">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-amber-50 p-1">{categoryImage(category.name) ? <img src={categoryImage(category.name)} alt="" className="h-full w-full object-contain" /> : <Package size={21} strokeWidth={1.8} />}</span>
           <span><span className="block text-xs font-bold text-slate-900 sm:text-sm">{category.name}</span><span className="mt-1 hidden text-[11px] leading-4 text-slate-500 sm:block">{category.detail}</span></span>
           <ArrowRight size={15} className="ml-auto hidden shrink-0 text-slate-300 transition group-hover:translate-x-1 group-hover:text-amber-600 sm:block" />
-        </a>)}
+        </Link>)}
       </div>
     </section>
   )
 }
 
-function ProductSection({ search, products, onAdd, onEnquiry }) {
-  const visibleProducts = useMemo(() => products.filter((product) => product.active && `${product.name} ${product.description} ${product.category}`.toLowerCase().includes(search.toLowerCase())), [products, search])
+function ProductSection({ search, products, categoryFilter, onClearCategory, onAdd, onEnquiry, showAllByDefault = false }) {
+  const [showAll, setShowAll] = useState(false)
+  const visibleProducts = useMemo(() => products.filter((product) => product.active
+    && (!categoryFilter || product.category === categoryFilter)
+    && `${product.name} ${product.description} ${product.category}`.toLowerCase().includes(search.toLowerCase())), [products, search, categoryFilter])
+
+  useEffect(() => setShowAll(false), [search, categoryFilter])
   return (
     <section id="products" className="border-y border-slate-200 bg-[#f7f7f5]">
       <div className="mx-auto max-w-7xl px-4 py-14 sm:px-6 lg:px-8 lg:py-16">
         <div className="mb-7 flex items-end justify-between gap-3">
-          <div><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-700">Picked for your project</p><h2 className="mt-1.5 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">Popular products</h2></div>
-          <a href="#contact" className="hidden items-center gap-1 text-xs font-bold text-slate-700 hover:text-amber-700 sm:flex">Need bulk pricing? <ArrowRight size={15} /></a>
+          <div><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-700">{categoryFilter || 'Picked for your project'}</p><h2 className="mt-1.5 text-2xl font-extrabold tracking-tight text-slate-900 sm:text-3xl">{categoryFilter ? `${categoryFilter} products` : 'Popular products'}</h2></div>
+          {categoryFilter && !showAllByDefault && <button type="button" onClick={onClearCategory} className="text-xs font-semibold text-amber-800 hover:text-amber-950">Show all categories</button>}
+          {!categoryFilter && <a href="#contact" className="hidden items-center gap-1 text-xs font-bold text-slate-700 hover:text-amber-700 sm:flex">Need bulk pricing? <ArrowRight size={15} /></a>}
         </div>
         {visibleProducts.length > 0 ? <div className="grid grid-cols-2 gap-3 sm:gap-5 lg:grid-cols-4">
-          {visibleProducts.map((product) => <article key={product.name} className="overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:-translate-y-0.5 hover:shadow-lg">
+          {visibleProducts.map((product, index) => <article key={product.id} className={`overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:-translate-y-0.5 hover:shadow-lg ${!showAllByDefault && !showAll && index >= 4 && index < 8 ? 'hidden md:block' : ''} ${!showAllByDefault && !showAll && index >= 8 ? 'hidden lg:block' : ''}`}>
             <div className={`relative aspect-[1.25] overflow-hidden ${product.color || 'bg-amber-50'}`}>
               {product.image ? <img src={product.image} alt={product.name} loading="lazy" className="h-full w-full object-cover transition duration-300 hover:scale-105" /> : <div className="flex h-full items-center justify-center text-amber-700"><Package size={38} strokeWidth={1.4} /></div>}
               <span className="absolute left-2.5 top-2.5 rounded bg-white/95 px-2 py-1 text-[8px] font-extrabold tracking-wider text-slate-800 sm:left-3 sm:top-3 sm:text-[9px]">{product.tag}</span>
@@ -154,12 +200,15 @@ function ProductSection({ search, products, onAdd, onEnquiry }) {
             </div>
           </article>)}
         </div> : <div className="rounded-xl border border-dashed border-slate-300 bg-white px-5 py-12 text-center"><Search size={24} className="mx-auto text-slate-400" /><p className="mt-3 text-sm font-semibold text-slate-800">{products.length === 0 ? 'Our product catalog is being updated.' : `No products match “${search}”`}</p><p className="mt-1 text-xs text-slate-500">{products.length === 0 ? 'Please call us for current products and pricing.' : 'Try a different product or category name.'}</p></div>}
+        {!showAllByDefault && visibleProducts.length > 4 && <div className="mt-7 flex justify-center"><button type="button" onClick={() => setShowAll((expanded) => !expanded)} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 text-xs font-bold text-slate-700 transition hover:border-amber-400 hover:text-amber-800">{showAll ? 'Show fewer products' : `Show all ${visibleProducts.length} products`}<ArrowRight size={14} className={showAll ? '-rotate-90' : 'rotate-90'} /></button></div>}
       </div>
     </section>
   )
 }
 
 function Storefront() {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [products, setProducts] = useState([])
   const [categories, setCategories] = useState([])
@@ -176,7 +225,12 @@ function Storefront() {
   const [formError, setFormError] = useState('')
   const [notice, setNotice] = useState('')
   const [sending, setSending] = useState(false)
+  const requestInFlight = useRef(false)
   const cartCount = cart.reduce((total, item) => total + item.quantity, 0)
+  const categorySlugFromPath = location.pathname.match(/^\/category\/([^/]+)/)?.[1] || ''
+  const selectedCategory = categories.find((category) => categorySlug(category.name) === categorySlugFromPath)
+  const categoryFilter = selectedCategory?.name || ''
+  const isCategoryRoute = Boolean(categorySlugFromPath)
 
   useEffect(() => {
     let cancelled = false
@@ -220,6 +274,7 @@ function Storefront() {
       return [...items, { product, quantity: 1 }]
     })
     setNotice(`${product.name} added to your cart`)
+    playUiSound('tap')
     window.setTimeout(() => setNotice(''), 2600)
   }
 
@@ -238,6 +293,7 @@ function Storefront() {
 
   async function submitRequest(event) {
     event.preventDefault()
+    if (requestInFlight.current) return
     const cleanContact = {
       name: contact.name.trim(),
       phone: contact.phone.trim(),
@@ -265,33 +321,47 @@ function Storefront() {
       setFormError('No service branch is available yet. Please contact us by phone.')
       return
     }
+    const submittedCart = cart
+    const requestPayload = {
+      id: `RT-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      request_type: requestType,
+      status: 'New',
+      branch_id: branchId,
+      customer_name: cleanContact.name,
+      phone: cleanContact.phone,
+      location: cleanContact.location,
+      items: submittedCart.map(({ product, quantity }) => ({ productId: product.id, name: product.name, quantity, unitPrice: sellingPrice(product) })),
+      total: 0,
+    }
+    requestInFlight.current = true
     setSending(true)
+    setModal('')
+    setCart([])
+    setContact({ name: '', phone: '', location: '' })
+    setNotice('Sending your request…')
     try {
-      const { error } = await supabase.from('customer_requests').insert({
-        id: `RT-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        request_type: requestType,
-        status: 'New',
-        branch_id: branchId,
-        customer_name: cleanContact.name,
-        phone: cleanContact.phone,
-        location: cleanContact.location,
-        items: cart.map(({ product, quantity }) => ({ productId: product.id, quantity })),
-        total: 0,
-      })
+      const { error } = await supabase.from('customer_requests').insert(requestPayload)
       if (error) {
+        setCart(submittedCart)
+        setContact(cleanContact)
+        setModal('details')
+        setNotice('')
         setFormError(`We couldn't send your enquiry: ${describeSupabaseError(error)}. Please try again or call us.`)
         return
       }
     } catch (sendError) {
+      setCart(submittedCart)
+      setContact(cleanContact)
+      setModal('details')
+      setNotice('')
       setFormError(`We couldn't send your enquiry: ${describeSupabaseError(sendError)}. Please try again or call us.`)
       return
     } finally {
+      requestInFlight.current = false
       setSending(false)
     }
-    setModal('')
-    setCart([])
-    setContact({ name: '', phone: '', location: '' })
     setFormError('')
+    playUiSound('success')
     setNotice('Your enquiry has been sent to Rajesh Traders.')
     window.setTimeout(() => setNotice(''), 4000)
   }
@@ -300,36 +370,59 @@ function Storefront() {
     setCart((items) => items.map((item) => item.product.id === productId ? { ...item, quantity: Math.max(1, quantity) } : item))
   }
 
+  function searchProducts(value) {
+    setSearch(value)
+    if (value && isCategoryRoute) navigate('/')
+  }
+
+  function selectCategory(category) {
+    setSearch('')
+    navigate(`/category/${categorySlug(category)}`)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function selectProduct(product) {
+    if (isCategoryRoute) navigate('/')
+    setSearch(product.name)
+    window.setTimeout(() => document.getElementById('products')?.scrollIntoView({ behavior: 'smooth' }), 0)
+  }
+
+  function goHome() {
+    navigate('/')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   return (
     <div className="min-h-screen bg-white text-slate-900">
-      <Header cartCount={cartCount} search={search} setSearch={setSearch} onCart={() => setModal('cart')} settings={settings} />
+      <Header cartCount={cartCount} search={search} onSearch={searchProducts} products={products} categories={categories} onSelectCategory={selectCategory} onSelectProduct={selectProduct} onCart={() => setModal('cart')} settings={settings} />
       <main>
-        <Hero phone={settings.phone} slides={settings.heroSlides} />
+        {!isCategoryRoute && <Hero phone={settings.phone} slides={settings.heroSlides} />}
         {storeError && <div role="alert" className="mx-auto max-w-7xl px-4 pt-5 text-sm text-rose-700">{storeError}</div>}
-        <div className="border-b border-slate-200 bg-white">
+        {!isCategoryRoute && <div className="border-b border-slate-200 bg-white">
           <div className="mx-auto grid max-w-7xl grid-cols-2 divide-x divide-slate-200 px-4 py-5 sm:grid-cols-4 sm:px-6 lg:px-8">
             {[['Cement & steel', 'Reliable building essentials'], ['Wholesale & retail', 'Options for every project'], ['Site delivery', 'Ask about your area'], ['Customer support', 'Talk to our team']].map(([title, subtitle]) => <div key={title} className="px-3 py-2 text-center sm:px-4"><p className="text-sm font-extrabold text-slate-900 sm:text-base">{title}</p><p className="mt-1 text-[10px] text-slate-500 sm:text-xs">{subtitle}</p></div>)}
           </div>
-        </div>
-        {categories.length > 0 && <CategorySection categories={categories} />}
-        {storeLoading ? <div className="border-y border-slate-200 bg-[#f7f7f5] px-4 py-16 text-center text-sm text-slate-500">Loading the live product catalog…</div> : <ProductSection search={search} products={products} onAdd={addToCart} onEnquiry={(product) => openRequest('Enquiry', product)} />}
-        <section id="about" className="mx-auto grid max-w-7xl gap-8 px-4 py-14 sm:px-6 md:grid-cols-2 md:items-center lg:px-8 lg:py-20">
+        </div>}
+        {isCategoryRoute && <section className="border-b border-slate-200 bg-white"><div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8"><button type="button" onClick={goHome} className="mb-5 inline-flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-amber-800"><ArrowRight size={14} className="rotate-180" /> All products</button>{selectedCategory ? <><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-700">Shop by category</p><h1 className="mt-1 text-2xl font-extrabold text-slate-900 sm:text-3xl">{selectedCategory.name}</h1><p className="mt-2 text-sm text-slate-500">{selectedCategory.detail || `Browse all ${selectedCategory.name.toLowerCase()} products.`}</p></> : storeLoading ? <><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-700">Shop by category</p><h1 className="mt-1 text-2xl font-extrabold text-slate-900 sm:text-3xl">Loading category…</h1></> : <><h1 className="text-2xl font-extrabold text-slate-900">Category not found</h1><p className="mt-2 text-sm text-slate-500">This category may have been removed from the store.</p></>}</div></section>}
+        {!isCategoryRoute && categories.length > 0 && <CategorySection categories={categories} />}
+        {storeLoading ? <div className="border-y border-slate-200 bg-[#f7f7f5] px-4 py-16 text-center text-sm text-slate-500">Loading the live product catalog…</div> : selectedCategory ? <ProductSection search={search} products={products} categoryFilter={categoryFilter} onClearCategory={goHome} onAdd={addToCart} onEnquiry={(product) => openRequest('Enquiry', product)} showAllByDefault /> : isCategoryRoute ? null : <ProductSection search={search} products={products} categoryFilter="" onClearCategory={() => {}} onAdd={addToCart} onEnquiry={(product) => openRequest('Enquiry', product)} />}
+        {!isCategoryRoute && <section id="about" className="mx-auto grid max-w-7xl gap-8 px-4 py-14 sm:px-6 md:grid-cols-2 md:items-center lg:px-8 lg:py-20">
           <div><p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-700">Built on trust</p><h2 className="mt-2 text-2xl font-extrabold leading-tight tracking-tight text-slate-900 sm:text-3xl">Good materials make a stronger tomorrow.</h2><p className="mt-4 max-w-xl text-sm leading-6 text-slate-600">Rajesh Traders helps homeowners, contractors and builders find reliable materials without the hassle. Get honest guidance, dependable brands and delivery that keeps your project moving.</p><a href="#contact" className="mt-6 inline-flex items-center gap-2 text-sm font-bold text-amber-700 hover:text-amber-800">Get to know us <ArrowRight size={16} /></a></div>
           <div className="grid grid-cols-2 gap-3 sm:gap-4">
             {[['Genuine brands', 'Only trusted, quality-assured products'], ['Helpful advice', 'Real people who know building'], ['On-time delivery', 'Materials delivered to your site'], ['Fair prices', 'Great value for every project']].map(([title, copy], index) => <div key={title} className="rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5"><span className="text-xl font-extrabold text-amber-600">0{index + 1}</span><h3 className="mt-3 text-xs font-bold text-slate-900 sm:text-sm">{title}</h3><p className="mt-1 text-[10px] leading-4 text-slate-500 sm:text-xs">{copy}</p></div>)}
           </div>
-        </section>
-        <section id="contact" className="bg-amber-500">
+        </section>}
+        {!isCategoryRoute && <section id="contact" className="bg-amber-500">
           <div className="mx-auto flex max-w-7xl flex-col items-start justify-between gap-4 px-4 py-8 sm:px-6 md:flex-row md:items-center lg:px-8">
             <div><p className="text-xl font-extrabold tracking-tight text-slate-950 sm:text-2xl">Planning a big project?</p><p className="mt-1 text-sm text-slate-800">Talk to us for bulk orders and a quote tailored to your needs.</p></div>
             <button onClick={() => openRequest('Enquiry')} className="inline-flex h-11 items-center gap-2 rounded-lg bg-slate-950 px-5 text-sm font-bold text-white transition hover:bg-slate-800"><Phone size={16} /> Request a quote</button>
           </div>
-        </section>
+        </section>}
       </main>
       <footer className="bg-[#101820] text-slate-300">
         <div className="mx-auto grid max-w-7xl gap-8 px-4 py-10 sm:px-6 md:grid-cols-[1.4fr_1fr_1fr] lg:px-8">
-          <div><a href="#home" className="inline-flex items-center gap-2.5"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500 text-slate-950"><HardHat size={20} /></span><span className="text-sm font-extrabold text-white">{settings.businessName}</span></a><p className="mt-3 max-w-xs text-xs leading-5 text-slate-400">Your dependable local partner for quality building materials and hardware.</p></div>
-          <div><h3 className="text-xs font-bold text-white">Explore</h3><div className="mt-3 grid grid-cols-2 gap-y-2 text-xs text-slate-400"><a href="#products" className="hover:text-white">Shop products</a><a href="#categories" className="hover:text-white">Categories</a><a href="#about" className="hover:text-white">About us</a><a href="#contact" className="hover:text-white">Contact</a></div></div>
+          <div><Link to="/" className="inline-flex items-center gap-2.5"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500 text-slate-950"><HardHat size={20} /></span><span className="text-sm font-extrabold text-white">{settings.businessName}</span></Link><p className="mt-3 max-w-xs text-xs leading-5 text-slate-400">Your dependable local partner for quality building materials and hardware.</p></div>
+          <div><h3 className="text-xs font-bold text-white">Explore</h3><div className="mt-3 grid grid-cols-2 gap-y-2 text-xs text-slate-400">{[['Shop products', '#products'], ['Categories', '#categories'], ['About us', '#about'], ['Contact', '#contact']].map(([label, href]) => <a key={label} href={isCategoryRoute ? `/${href}` : href} className="hover:text-white">{label}</a>)}</div></div>
           <div><h3 className="text-xs font-bold text-white">Visit or call us</h3><p className="mt-3 text-xs leading-5 text-slate-400">{settings.address || 'Call us for store location and delivery details.'}</p><a href={`tel:${settings.phone.replace(/[^\d+]/g, '')}`} className="mt-2 inline-block text-xs font-semibold text-amber-400 hover:text-amber-300">{settings.phone}</a><Link to="/admin" className="mt-3 flex items-center gap-1 text-[11px] text-slate-500 hover:text-white"><LogIn size={13} /> Administrator / branch login</Link></div>
         </div>
         <div className="border-t border-white/10 px-4 py-4 text-center text-[10px] text-slate-500">© 2026 Rajesh Traders. All rights reserved.</div>

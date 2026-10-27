@@ -15,7 +15,9 @@ export function playUiSound(type = 'tap') {
 
   const notes = type === 'notification'
     ? [{ frequency: 660, start: 0 }, { frequency: 880, start: 0.13 }, { frequency: 1040, start: 0.26 }]
-    : [{ frequency: 680, start: 0 }]
+    : type === 'success'
+      ? [{ frequency: 720, start: 0 }, { frequency: 960, start: 0.11 }]
+      : [{ frequency: 680, start: 0 }]
 
   for (const note of notes) {
     const oscillator = context.createOscillator()
@@ -24,12 +26,12 @@ export function playUiSound(type = 'tap') {
     oscillator.type = 'sine'
     oscillator.frequency.setValueAtTime(note.frequency, startAt)
     volume.gain.setValueAtTime(0.0001, startAt)
-    volume.gain.exponentialRampToValueAtTime(type === 'notification' ? 0.08 : 0.035, startAt + 0.015)
-    volume.gain.exponentialRampToValueAtTime(0.0001, startAt + (type === 'notification' ? 0.11 : 0.055))
+    volume.gain.exponentialRampToValueAtTime(type === 'notification' ? 0.08 : type === 'success' ? 0.045 : 0.035, startAt + 0.015)
+    volume.gain.exponentialRampToValueAtTime(0.0001, startAt + (type === 'notification' ? 0.11 : type === 'success' ? 0.09 : 0.055))
     oscillator.connect(volume)
     volume.connect(context.destination)
     oscillator.start(startAt)
-    oscillator.stop(startAt + (type === 'notification' ? 0.12 : 0.065))
+    oscillator.stop(startAt + (type === 'notification' ? 0.12 : type === 'success' ? 0.1 : 0.065))
   }
   return true
 }

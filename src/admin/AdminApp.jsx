@@ -17,6 +17,7 @@ import {
   LogOut,
   Menu,
   Package,
+  Pencil,
   Plus,
   Search,
   Save,
@@ -53,6 +54,79 @@ import { playUiSound } from '../lib/uiSounds.js'
 
 const formatDate = (date) => new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date))
 const OWNER_EMAIL = 'dg3667610@gmail.com'
+
+async function downloadBillPdf(bill, businessName, branchName) {
+  const { jsPDF } = await import('jspdf')
+  const document = new jsPDF()
+  const pageWidth = document.internal.pageSize.getWidth()
+  const rightEdge = pageWidth - 14
+  let y = 20
+
+  document.setFont('helvetica', 'bold')
+  document.setFontSize(18)
+  document.text(businessName || 'Rajesh Traders', 14, y)
+  document.setFontSize(11)
+  document.text('INVOICE', rightEdge, y, { align: 'right' })
+  y += 9
+  document.setFont('helvetica', 'normal')
+  document.setFontSize(10)
+  document.text(`Invoice: ${bill.id}`, 14, y)
+  document.text(`Date: ${formatDate(bill.createdAt)}`, rightEdge, y, { align: 'right' })
+  y += 7
+  document.text(`Branch: ${branchName || 'Rajesh Traders'}`, 14, y)
+  y += 12
+  document.setFont('helvetica', 'bold')
+  document.text('Bill to', 14, y)
+  y += 6
+  document.setFont('helvetica', 'normal')
+  document.text(`Name: ${bill.customer.name || '-'}`, 14, y)
+  y += 6
+  document.text(`Phone: ${bill.customer.phone || '-'}`, 14, y)
+  y += 6
+  const locationLines = document.splitTextToSize(`Delivery: ${bill.customer.location || '-'}`, pageWidth - 28)
+  document.text(locationLines, 14, y)
+  y += locationLines.length * 5 + 7
+
+  document.setFont('helvetica', 'bold')
+  document.text('Item', 14, y)
+  document.text('Qty', pageWidth - 75, y, { align: 'right' })
+  document.text('Unit price', pageWidth - 47, y, { align: 'right' })
+  document.text('Amount', rightEdge, y, { align: 'right' })
+  y += 3
+  document.line(14, y, rightEdge, y)
+  y += 7
+
+  document.setFont('helvetica', 'normal')
+  for (const item of bill.items) {
+    const itemLines = document.splitTextToSize(item.name || item.productId || 'Product', pageWidth - 112)
+    const rowHeight = Math.max(7, itemLines.length * 5)
+    if (y + rowHeight > 275) {
+      document.addPage()
+      y = 20
+    }
+    const quantity = Number(item.quantity || 0)
+    const unitPrice = Number(item.unitPrice || 0)
+    document.text(itemLines, 14, y)
+    document.text(String(quantity), pageWidth - 75, y, { align: 'right' })
+    document.text(`INR ${unitPrice.toLocaleString('en-IN')}`, pageWidth - 47, y, { align: 'right' })
+    document.text(`INR ${(quantity * unitPrice).toLocaleString('en-IN')}`, rightEdge, y, { align: 'right' })
+    y += rowHeight + 3
+  }
+
+  if (y > 275) {
+    document.addPage()
+    y = 20
+  }
+  document.line(14, y, rightEdge, y)
+  y += 9
+  document.setFont('helvetica', 'bold')
+  document.text(`Total: INR ${Number(bill.total || 0).toLocaleString('en-IN')}`, rightEdge, y, { align: 'right' })
+  y += 12
+  document.setFont('helvetica', 'normal')
+  document.setFontSize(9)
+  document.text('Please contact the branch for payment and delivery arrangements.', 14, y)
+  document.save(`${bill.id}.pdf`)
+}
 
 function LoginScreen({ onLogin }) {
   const [mode, setMode] = useState('signin')
@@ -549,20 +623,28 @@ function ProductManagement({ products, onSave, categories, onSaveCategories, can
   </div>
 }
 
-function RequestManagement({ session, requests, saveRequests, bills, saveBills, branches }) {
+function RequestManagement({ session, requests, saveRequests, bills, saveBills, branches, clearRequests, businessName }) {
   const scopedRequests = session.role === 'owner' ? requests : requests.filter((request) => request.branchId === session.branchId)
   const [filter, setFilter] = useState('All')
   const [view, setView] = useState('Requests')
   const [error, setError] = useState('')
+  const [selectedRequest, setSelectedRequest] = useState(null)
+  const [selectedBill, setSelectedBill] = useState(null)
+  const [billDraft, setBillDraft] = useState(null)
+  const [clearingHistory, setClearingHistory] = useState(false)
   const filtered = scopedRequests.filter((request) => filter === 'All' || request.type === filter)
   const scopedBills = session.role === 'owner' ? bills : bills.filter((bill) => bill.branchId === session.branchId)
+  const confirmedOrders = scopedRequests.filter((request) => request.type === 'Order' && ['Confirmed', 'Completed'].includes(request.status))
+  const unbilledRequests = scopedRequests.filter((request) => !bills.some((bill) => bill.requestId === request.id))
 
   async function updateRequest(id, key, value) {
     try {
       await saveRequests(requests.map((request) => request.id === id ? { ...request, [key]: value } : request))
       setError('')
+      return true
     } catch (saveError) {
       setError(saveError.message)
+      return false
     }
   }
 
@@ -580,8 +662,53 @@ function RequestManagement({ session, requests, saveRequests, bills, saveBills, 
     try {
       await saveBills([invoice, ...bills])
       setError('')
+      return invoice
     } catch (saveError) {
       setError(saveError.message)
+      return null
+    }
+  }
+
+  async function sendConfirmedBill(request) {
+    const whatsappWindow = window.open('about:blank', '_blank')
+    if (whatsappWindow) whatsappWindow.opener = null
+    try {
+      const invoice = bills.find((bill) => bill.requestId === request.id) || await createBill(request)
+      if (!invoice) {
+        whatsappWindow?.close()
+        return
+      }
+      const branchName = branches.find((branch) => branch.id === invoice.branchId)?.name || session.branchName
+      await downloadBillPdf(invoice, businessName, branchName)
+      let phone = request.customer.phone.replace(/\D/g, '')
+      if (phone.length === 10) phone = `91${phone}`
+      else if (phone.length === 11 && phone.startsWith('0')) phone = `91${phone.slice(1)}`
+      const message = `Hello ${request.customer.name}, your ${businessName || 'Rajesh Traders'} bill ${invoice.id} is ready. I have downloaded the PDF. Please attach ${invoice.id}.pdf in this chat before sending.`
+      const whatsAppUrl = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`
+      if (whatsappWindow) {
+        whatsappWindow.location.href = whatsAppUrl
+        setError('')
+      } else {
+        setError(`The PDF was downloaded. Allow pop-ups to open WhatsApp for ${request.customer.phone}.`)
+      }
+    } catch (sendError) {
+      whatsappWindow?.close()
+      setError(`Unable to prepare the bill: ${sendError.message}`)
+    }
+  }
+
+  async function clearHistory() {
+    if (unbilledRequests.length === 0 || clearingHistory) return
+    const confirmed = window.confirm(`Permanently delete ${unbilledRequests.length} unbilled request${unbilledRequests.length === 1 ? '' : 's'} from ${session.role === 'owner' ? 'all branches' : session.branchName}? Requests linked to bills will be kept. This cannot be undone.`)
+    if (!confirmed) return
+    setClearingHistory(true)
+    try {
+      await clearRequests(unbilledRequests.map((request) => request.id))
+      setError('')
+    } catch (clearError) {
+      setError(clearError.message)
+    } finally {
+      setClearingHistory(false)
     }
   }
 
@@ -597,7 +724,21 @@ function RequestManagement({ session, requests, saveRequests, bills, saveBills, 
   return <div className="space-y-5">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold text-blue-700">{session.role === 'owner' ? 'All locations' : session.branchName}</p><h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">Bills & enquiries</h1><p className="mt-1 text-sm text-slate-500">Follow up on customer requests and prepare invoices.</p></div><div className="flex rounded-lg border border-slate-200 bg-white p-1">{['Requests', 'Bills'].map((value) => <button key={value} onClick={() => setView(value)} className={`rounded-md px-3 py-2 text-[10px] font-semibold ${view === value ? 'bg-blue-700 text-white' : 'text-slate-500 hover:text-slate-900'}`}>{value}{value === 'Bills' ? ` (${scopedBills.length})` : ''}</button>)}</div></div>
     {error && <p role="alert" className="rounded-lg bg-rose-50 px-4 py-3 text-xs text-rose-700">{error}</p>}
-    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+    {view === 'Requests' && filtered.length > 0 && <p className="text-[10px] text-slate-500">Select a request ID to review the customer details and confirm it.</p>}
+    {view === 'Bills' && scopedBills.length > 0 && <p className="text-[10px] text-slate-500">Select an invoice ID to edit its customer details, line items, or total.</p>}
+    <section onClick={(event) => {
+      const clickedId = event.target.closest('p.text-xs.font-bold.text-blue-700')
+      if (!clickedId) return
+      const id = clickedId.textContent.trim()
+      if (view === 'Requests') setSelectedRequest(filtered.find((request) => request.id === id) || null)
+      if (view === 'Bills') {
+        const bill = scopedBills.find((item) => item.id === id)
+        if (bill) {
+          setSelectedBill(bill)
+          setBillDraft({ ...bill, customer: { ...bill.customer }, items: bill.items.map((item) => ({ ...item })) })
+        }
+      }
+    }} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
       {view === 'Requests' ? <>
         <div className="flex justify-end border-b border-slate-100 px-4 py-2"><div className="flex rounded-lg bg-slate-50 p-1">{['All', 'Order', 'Enquiry'].map((value) => <button key={value} onClick={() => setFilter(value)} className={`rounded-md px-3 py-1.5 text-[9px] font-semibold ${filter === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500'}`}>{value === 'All' ? 'All requests' : `${value}s`}</button>)}</div></div>
         {filtered.length === 0 ? <EmptyState icon={ClipboardList} title={filter === 'All' ? 'No website requests yet' : `No ${filter.toLowerCase()}s yet`} copy="Customer orders and enquiries appear here with their contact and delivery details." /> :
@@ -608,13 +749,53 @@ function RequestManagement({ session, requests, saveRequests, bills, saveBills, 
       </> : scopedBills.length === 0 ? <EmptyState icon={FileText} title="No bills created yet" copy="Confirm a customer order, then select Create bill to make its invoice." /> :
         <div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left"><thead><tr className="bg-slate-50 text-[9px] font-semibold uppercase tracking-wider text-slate-400"><th className="px-5 py-3">Invoice</th><th className="px-3 py-3">Customer & delivery</th><th className="px-3 py-3">Items</th><th className="px-3 py-3">Branch</th><th className="px-3 py-3">Issued</th><th className="px-3 py-3">Total</th><th className="px-5 py-3">Payment status</th></tr></thead><tbody>{scopedBills.map((bill) => <tr key={bill.id} className="border-t border-slate-100 align-top"><td className="px-5 py-4"><p className="text-xs font-bold text-blue-700">{bill.id}</p><p className="mt-1 text-[9px] text-slate-400">From {bill.requestId}</p></td><td className="px-3 py-4"><p className="text-xs font-semibold text-slate-800">{bill.customer.name}</p><p className="mt-1 text-[10px] text-slate-500">{bill.customer.phone}</p><p className="mt-1 max-w-[170px] text-[9px] text-slate-400">{bill.customer.location}</p></td><td className="px-3 py-4"><div className="space-y-1">{bill.items.map((item) => <p key={item.productId} className="text-[10px] text-slate-600">{item.name} × {item.quantity}</p>)}</div></td><td className="px-3 py-4 text-xs text-slate-600">{branches.find((branch) => branch.id === bill.branchId)?.name || 'Unassigned'}</td><td className="px-3 py-4 text-[10px] text-slate-500">{formatDate(bill.createdAt)}</td><td className="px-3 py-4 text-xs font-bold text-slate-800">{formatRupees(bill.total)}</td><td className="px-5 py-4"><select aria-label={`Payment status for ${bill.id}`} value={bill.status} onChange={(event) => updateBillStatus(bill.id, event.target.value)} className="rounded-md border border-slate-200 bg-white px-2 py-2 text-[10px]"><option>Unpaid</option><option>Paid</option><option>Void</option></select></td></tr>)}</tbody></table></div>}
     </section>
+    {view === 'Requests' && <>
+      {confirmedOrders.length > 0 && <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-5 py-4"><h2 className="text-sm font-bold text-slate-900">Confirmed orders</h2><p className="mt-1 text-[10px] text-slate-500">Generate a PDF invoice and open a WhatsApp chat to the customer.</p></div><div className="divide-y divide-slate-100">{confirmedOrders.map((request) => <div key={request.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold text-slate-800">{request.customer.name} <span className="font-normal text-slate-500">· {request.id}</span></p><p className="mt-1 text-[10px] text-slate-500">{request.customer.phone} · {request.customer.location} · {request.items.length} product{request.items.length === 1 ? '' : 's'} · {formatRupees(request.total)}</p></div><button type="button" onClick={() => sendConfirmedBill(request)} className="inline-flex h-9 items-center gap-2 rounded-lg bg-emerald-700 px-3 text-xs font-bold text-white hover:bg-emerald-800"><FileText size={14} /> Send bill</button></div>)}</div></section>}
+      <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-white p-4"><div><h2 className="text-xs font-bold text-slate-900">Request history</h2><p className="mt-1 text-[10px] leading-4 text-slate-500">{unbilledRequests.length} unbilled request{unbilledRequests.length === 1 ? '' : 's'} can be removed. Requests linked to bills are always kept.</p></div><button type="button" disabled={unbilledRequests.length === 0 || clearingHistory} onClick={clearHistory} className="inline-flex h-9 items-center gap-2 rounded-lg border border-rose-300 px-3 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={14} />{clearingHistory ? 'Clearing…' : 'Clear unbilled history'}</button></section>
+    </>}
+    {selectedRequest && view === 'Requests' && <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/55 p-0 sm:items-center sm:p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedRequest(null) }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="request-details-title" className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-t-xl bg-white p-5 shadow-2xl sm:rounded-xl sm:p-6">
+        <div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-bold uppercase text-amber-700">{selectedRequest.type} · {selectedRequest.id}</p><h2 id="request-details-title" className="mt-1 text-xl font-bold text-slate-900">{selectedRequest.customer.name}</h2></div><button type="button" aria-label="Close request details" onClick={() => setSelectedRequest(null)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={18} /></button></div>
+        <div className="mt-4 grid gap-3 rounded-lg bg-slate-50 p-4 text-xs sm:grid-cols-2"><div><p className="text-[10px] font-semibold text-slate-400">Phone</p><a href={`tel:${selectedRequest.customer.phone}`} className="mt-1 inline-block font-semibold text-blue-700">{selectedRequest.customer.phone}</a></div><div><p className="text-[10px] font-semibold text-slate-400">Place / delivery location</p><p className="mt-1 font-semibold text-slate-800">{selectedRequest.customer.location}</p></div><div><p className="text-[10px] font-semibold text-slate-400">Branch</p><p className="mt-1 font-semibold text-slate-800">{branches.find((branch) => branch.id === selectedRequest.branchId)?.name || 'Unassigned'}</p></div><div><p className="text-[10px] font-semibold text-slate-400">Current status</p><div className="mt-1"><StatusPill status={selectedRequest.status} /></div></div></div>
+        <h3 className="mt-5 text-xs font-bold text-slate-800">Requested choices</h3>
+        <div className="mt-2 divide-y divide-slate-100 rounded-lg border border-slate-200">{selectedRequest.items.map((item, index) => <div key={`${item.productId}-${index}`} className="flex items-center justify-between gap-3 px-3 py-2.5 text-xs"><span className="font-semibold text-slate-800">{item.name || item.productId || 'Product'} <span className="font-normal text-slate-500">× {item.quantity}</span></span><span className="text-slate-600">{formatRupees(Number(item.unitPrice || 0) * Number(item.quantity || 0))}</span></div>)}</div>
+        <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3 text-sm font-bold"><span>Estimated value</span><span>{formatRupees(selectedRequest.total)}</span></div>
+        <div className="mt-5 flex flex-wrap justify-end gap-2"><button type="button" onClick={() => setSelectedRequest(null)} className="h-10 rounded-lg border border-slate-200 px-4 text-xs font-semibold text-slate-600">Close</button>{selectedRequest.status !== 'Confirmed' && selectedRequest.status !== 'Completed' && <button type="button" onClick={async () => { if (await updateRequest(selectedRequest.id, 'status', 'Confirmed')) setSelectedRequest({ ...selectedRequest, status: 'Confirmed' }) }} className="inline-flex h-10 items-center gap-2 rounded-lg bg-emerald-700 px-4 text-xs font-bold text-white hover:bg-emerald-800"><Check size={15} /> Confirm request</button>}</div>
+      </section>
+    </div>}
+    {selectedBill && billDraft && view === 'Bills' && <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/55 p-0 sm:items-center sm:p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedBill(null) }}>
+      <form onSubmit={async (event) => {
+        event.preventDefault()
+        const items = billDraft.items.map((item) => ({ ...item, name: item.name.trim(), quantity: Number(item.quantity), unitPrice: Number(item.unitPrice) }))
+        if (items.some((item) => !item.name || !Number.isFinite(item.quantity) || item.quantity < 1 || !Number.isFinite(item.unitPrice) || item.unitPrice < 0)) {
+          setError('Enter an item name, quantity of at least one, and a valid unit price for every line.')
+          return
+        }
+        const updatedBill = { ...billDraft, items, total: items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0) }
+        try {
+          await saveBills(bills.map((bill) => bill.id === updatedBill.id ? updatedBill : bill))
+          setError('')
+          setSelectedBill(null)
+        } catch (saveError) {
+          setError(saveError.message)
+        }
+      }} className="max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-t-xl bg-white p-5 shadow-2xl sm:rounded-xl sm:p-6">
+        <div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-bold uppercase text-blue-700">Edit invoice</p><h2 className="mt-1 text-xl font-bold text-slate-900">{selectedBill.id}</h2></div><button type="button" aria-label="Close bill editor" onClick={() => setSelectedBill(null)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={18} /></button></div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2"><Field label="Customer name" value={billDraft.customer.name} onChange={(value) => setBillDraft({ ...billDraft, customer: { ...billDraft.customer, name: value } })} placeholder="Customer name" /><Field label="Phone" value={billDraft.customer.phone} onChange={(value) => setBillDraft({ ...billDraft, customer: { ...billDraft.customer, phone: value } })} placeholder="Phone number" /><div className="sm:col-span-2"><Field label="Delivery location" value={billDraft.customer.location} onChange={(value) => setBillDraft({ ...billDraft, customer: { ...billDraft.customer, location: value } })} placeholder="Delivery location" /></div></div>
+        <div className="mt-5 flex items-center justify-between"><h3 className="text-xs font-bold text-slate-800">Invoice items</h3><button type="button" onClick={() => setBillDraft({ ...billDraft, items: [...billDraft.items, { productId: `custom-${Date.now()}`, name: '', quantity: 1, unitPrice: 0 }] })} className="inline-flex h-8 items-center gap-1 rounded-md border border-slate-200 px-2.5 text-[10px] font-semibold text-slate-700"><Plus size={13} /> Add item</button></div>
+        <div className="mt-2 space-y-2">{billDraft.items.map((item, index) => <div key={`${item.productId}-${index}`} className="grid grid-cols-[minmax(0,1fr)_70px_90px_32px] items-end gap-2"><Field label={index === 0 ? 'Item' : ''} value={item.name} onChange={(value) => setBillDraft({ ...billDraft, items: billDraft.items.map((row, rowIndex) => rowIndex === index ? { ...row, name: value } : row) })} placeholder="Item name" /><Field label={index === 0 ? 'Qty' : ''} type="number" value={item.quantity} onChange={(value) => setBillDraft({ ...billDraft, items: billDraft.items.map((row, rowIndex) => rowIndex === index ? { ...row, quantity: value } : row) })} placeholder="1" /><Field label={index === 0 ? 'Unit price' : ''} type="number" value={item.unitPrice ?? 0} onChange={(value) => setBillDraft({ ...billDraft, items: billDraft.items.map((row, rowIndex) => rowIndex === index ? { ...row, unitPrice: value } : row) })} placeholder="0" /><button type="button" disabled={billDraft.items.length === 1} aria-label={`Remove ${item.name || 'item'}`} onClick={() => setBillDraft({ ...billDraft, items: billDraft.items.filter((_, rowIndex) => rowIndex !== index) })} className="mb-0.5 flex h-9 w-8 items-center justify-center rounded-md text-rose-700 disabled:opacity-30"><X size={15} /></button></div>)}</div>
+        <p className="mt-4 border-t border-slate-100 pt-3 text-right text-sm font-bold text-slate-900">Total: {formatRupees(billDraft.items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unitPrice || 0), 0))}</p>
+        <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setSelectedBill(null)} className="h-10 rounded-lg border border-slate-200 px-4 text-xs font-semibold text-slate-600">Cancel</button><button type="submit" className="inline-flex h-10 items-center gap-2 rounded-lg bg-blue-700 px-4 text-xs font-bold text-white hover:bg-blue-800"><Save size={14} /> Save invoice</button></div>
+      </form>
+    </div>}
   </div>
 }
 
-function BranchManagement({ branches, saveBranches, onSelectBranch }) {
+function BranchManagement({ branches, saveBranches, onSelectBranch, requests = [], bills = [] }) {
   const [form, setForm] = useState({ name: '', city: '', manager: '' })
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
+  const [branchDraft, setBranchDraft] = useState(null)
 
   async function addBranch(event) {
     event.preventDefault()
@@ -635,14 +816,51 @@ function BranchManagement({ branches, saveBranches, onSelectBranch }) {
     }
   }
 
+  async function saveBranchEdit(event) {
+    event.preventDefault()
+    if (!branchDraft.name.trim() || !branchDraft.city.trim()) {
+      setError('Enter a branch name and city.')
+      return
+    }
+    try {
+      await saveBranches(branches.map((branch) => branch.id === branchDraft.id
+        ? { ...branch, name: branchDraft.name.trim(), city: branchDraft.city.trim(), manager: branchDraft.manager.trim() }
+        : branch))
+      setBranchDraft(null)
+      setError('')
+    } catch (saveError) {
+      setError(saveError.message)
+    }
+  }
+
+  async function removeBranch(branch) {
+    if (branch.isMain) {
+      setError('The main branch cannot be deleted.')
+      return
+    }
+    if (requests.some((request) => request.branchId === branch.id) || bills.some((bill) => bill.branchId === branch.id)) {
+      setError('This branch has customer requests or bills. Keep it so its business history remains available.')
+      return
+    }
+    if (!window.confirm(`Delete the ${branch.name} branch? Staff profiles assigned to it must be moved first.`)) return
+    try {
+      await saveBranches(branches.filter((item) => item.id !== branch.id))
+      setError('')
+    } catch {
+      setError('This branch is still linked to a staff profile or business record. Reassign or remove those references before deleting it.')
+    }
+  }
+
   return <div className="space-y-5">
     <div><p className="text-xs font-semibold text-blue-700">Locations & access</p><h1 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">Branches</h1><p className="mt-1 text-sm text-slate-500">Branch staff accounts are assigned separately and restricted to their own branch.</p></div>
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{branches.map((branch) => <button type="button" key={branch.id} onClick={() => onSelectBranch(branch.id)} className="rounded-xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-amber-300 hover:shadow-md"><span className="flex items-center justify-between"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-50 text-amber-700"><Building2 size={17} /></span><span className={`rounded-full px-2 py-1 text-[9px] font-semibold ${branch.isMain ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>{branch.isMain ? 'Main account' : 'Branch'}</span></span><h2 className="mt-4 text-sm font-bold text-slate-900">{branch.name}</h2><p className="mt-1 text-xs text-slate-500">{branch.city}</p><span className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3"><span className="text-[10px] font-semibold text-slate-700">{branch.manager || 'No manager listed'}</span><ChevronRight size={16} className="shrink-0 text-slate-400" /></span><span className="mt-3 block text-[10px] font-semibold text-amber-700">View performance and activity →</span></button>)}</div>
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-5 py-4"><h2 className="text-sm font-bold text-slate-900">Edit or remove branches</h2><p className="mt-1 text-[10px] text-slate-500">Branches with customer history or staff assignments cannot be deleted.</p></div><div className="divide-y divide-slate-100">{branches.map((branch) => <div key={branch.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold text-slate-800">{branch.name}</p><p className="mt-1 text-[10px] text-slate-500">{branch.city}{branch.manager ? ` · ${branch.manager}` : ''}</p></div><div className="flex items-center gap-2"><button type="button" onClick={() => { setBranchDraft({ ...branch }); setError('') }} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 px-2.5 text-[10px] font-semibold text-slate-700 hover:border-amber-400"><Pencil size={13} /> Edit</button><button type="button" disabled={branch.isMain} onClick={() => removeBranch(branch)} title={branch.isMain ? 'The main branch cannot be deleted' : 'Delete branch'} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 px-2.5 text-[10px] font-semibold text-rose-700 hover:border-rose-300 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 size={13} /> Delete</button></div></div>)}</div></section>
     <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6"><div className="mb-4 flex items-center gap-3"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-700"><Plus size={18} /></span><div><h2 className="text-sm font-bold text-slate-900">Add a branch</h2><p className="mt-1 text-[10px] text-slate-500">Branch login credentials are managed securely in Supabase Authentication.</p></div></div>
       <form onSubmit={addBranch} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><Field label="Branch name" value={form.name} onChange={(value) => setForm({ ...form, name: value })} placeholder="Branch name" /><Field label="City" value={form.city} onChange={(value) => setForm({ ...form, city: value })} placeholder="City" /><Field label="Manager name (optional)" value={form.manager} onChange={(value) => setForm({ ...form, manager: value })} placeholder="Manager name" /><button type="submit" className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-lg bg-blue-700 px-4 text-xs font-bold text-white hover:bg-blue-800"><Plus size={15} /> Add branch</button></form>
       {error && <p role="alert" className="mt-3 text-xs text-rose-700">{error}</p>}{success && <p role="status" className="mt-3 text-xs font-medium text-emerald-700">{success}</p>}
     </section>
     <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-[10px] leading-5 text-blue-900">After creating a branch, create its staff user in Supabase Authentication and assign the user's branch ID in <code>user_profiles</code>. RLS enforces branch-specific access.</div>
+    {branchDraft && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setBranchDraft(null) }}><form onSubmit={saveBranchEdit} className="w-full max-w-md space-y-3 rounded-xl bg-white p-5 shadow-2xl"><div className="flex items-start justify-between"><div><p className="text-[10px] font-bold uppercase text-amber-700">Branch settings</p><h2 className="mt-1 text-lg font-bold text-slate-900">Edit branch</h2></div><button type="button" aria-label="Close branch editor" onClick={() => setBranchDraft(null)} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={17} /></button></div><Field label="Branch name" value={branchDraft.name} onChange={(value) => setBranchDraft({ ...branchDraft, name: value })} placeholder="Branch name" /><Field label="City" value={branchDraft.city} onChange={(value) => setBranchDraft({ ...branchDraft, city: value })} placeholder="City" /><Field label="Manager" value={branchDraft.manager} onChange={(value) => setBranchDraft({ ...branchDraft, manager: value })} placeholder="Manager name" />{error && <p role="alert" className="text-xs text-rose-700">{error}</p>}<div className="flex justify-end gap-2 pt-2"><button type="button" onClick={() => setBranchDraft(null)} className="h-9 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600">Cancel</button><button type="submit" className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-700 px-3 text-xs font-bold text-white"><Save size={13} /> Save branch</button></div></form></div>}
   </div>
 }
 
@@ -908,27 +1126,47 @@ export function AdminApp() {
 
   async function saveRequests(next) {
     const previousById = new Map(requests.map((request) => [request.id, request]))
-    for (const request of next) {
+    const writes = next.map((request) => {
       const previous = previousById.get(request.id)
-      const update = { status: request.status, branch_id: request.branchId }
-      const query = previous
-        ? supabase.from('customer_requests').update(update).eq('id', request.id)
+      if (previous && previous.status === request.status && previous.branchId === request.branchId) return null
+      return previous
+        ? supabase.from('customer_requests').update({ status: request.status, branch_id: request.branchId }).eq('id', request.id)
         : supabase.from('customer_requests').insert(toRequest(request))
-      const { error: requestError } = await query
-      if (requestError) throw requestError
-    }
+    }).filter(Boolean)
+    const results = await Promise.all(writes)
+    const failedWrite = results.find((result) => result.error)
+    if (failedWrite) throw failedWrite.error
     setRequests(next)
   }
 
+  async function deleteRequests(ids) {
+    if (!ids.length) return
+    const { error: deleteError } = await supabase.from('customer_requests').delete().in('id', ids)
+    if (deleteError) throw deleteError
+    const removedIds = new Set(ids)
+    ids.forEach((id) => requestIdsRef.current.delete(id))
+    setRequests((current) => current.filter((request) => !removedIds.has(request.id)))
+  }
+
   async function saveBills(next) {
-    const previousIds = new Set(bills.map((bill) => bill.id))
-    for (const bill of next) {
-      const query = previousIds.has(bill.id)
-        ? supabase.from('bills').update({ status: bill.status }).eq('id', bill.id)
+    const previousById = new Map(bills.map((bill) => [bill.id, bill]))
+    const writes = next.map((bill) => {
+      const previous = previousById.get(bill.id)
+      if (previous && JSON.stringify(previous) === JSON.stringify(bill)) return null
+      return previous
+        ? supabase.from('bills').update({
+          customer_name: bill.customer.name,
+          phone: bill.customer.phone,
+          location: bill.customer.location,
+          items: bill.items,
+          total: Number(bill.total),
+          status: bill.status,
+        }).eq('id', bill.id)
         : supabase.from('bills').insert(toBill(bill))
-      const { error: billError } = await query
-      if (billError) throw billError
-    }
+    }).filter(Boolean)
+    const results = await Promise.all(writes)
+    const failedWrite = results.find((result) => result.error)
+    if (failedWrite) throw failedWrite.error
     setBills(next)
   }
 
@@ -942,6 +1180,7 @@ export function AdminApp() {
     try {
       await save(next)
       setError('')
+      playUiSound('success')
     } catch (saveError) {
       setError(describeSupabaseError(saveError))
       throw saveError
@@ -953,14 +1192,14 @@ export function AdminApp() {
 
   let content
   if (section === 'Products & pricing' || section === 'Products') content = <ProductManagement products={products} onSave={(next) => handleSave(saveProducts, next)} categories={categories} onSaveCategories={(next) => handleSave(saveCategories, next)} canEdit={isOwner} />
-  else if (section === 'Bills & enquiries') content = <RequestManagement session={session} requests={requests} saveRequests={(next) => handleSave(saveRequests, next)} bills={bills} saveBills={(next) => handleSave(saveBills, next)} branches={branches} />
+  else if (section === 'Bills & enquiries') content = <RequestManagement session={session} requests={requests} saveRequests={(next) => handleSave(saveRequests, next)} bills={bills} saveBills={(next) => handleSave(saveBills, next)} branches={branches} clearRequests={(ids) => handleSave(deleteRequests, ids)} businessName={settings.businessName} />
   else if (section === 'Branches' && isOwner && selectedBranchId) {
     const selectedBranch = branches.find((branch) => branch.id === selectedBranchId)
     content = selectedBranch
       ? <BranchDetails branch={selectedBranch} requests={requests} bills={bills} onBack={() => setSelectedBranchId('')} />
-      : <BranchManagement branches={branches} saveBranches={(next) => handleSave(saveBranches, next)} onSelectBranch={setSelectedBranchId} />
+        : <BranchManagement branches={branches} saveBranches={(next) => handleSave(saveBranches, next)} onSelectBranch={setSelectedBranchId} requests={requests} bills={bills} />
   }
-  else if (section === 'Branches' && isOwner) content = <BranchManagement branches={branches} saveBranches={(next) => handleSave(saveBranches, next)} onSelectBranch={setSelectedBranchId} />
+      else if (section === 'Branches' && isOwner) content = <BranchManagement branches={branches} saveBranches={(next) => handleSave(saveBranches, next)} onSelectBranch={setSelectedBranchId} requests={requests} bills={bills} />
   else if (section === 'Settings' && isOwner) content = <SettingsPage settings={settings} saveSettings={(next) => handleSave(saveSettings, next)} error={error} setError={setError} />
   else content = <Dashboard session={session} requests={requests} branches={branches} onBranchSelect={(branchId) => { setSelectedBranchId(branchId); setSection('Branches') }} />
 
